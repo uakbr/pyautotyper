@@ -15,6 +15,8 @@ from tkinter import ttk, scrolledtext, filedialog, messagebox
 import platform
 import pyautogui
 import keyboard
+import re
+import subprocess
 
 # -----------------------------------------------------------------------------
 # Configuration and Setup
@@ -107,65 +109,134 @@ def secure_random():
         # Fall back to less secure but still acceptable random
         return random.random()
 
+def get_active_window_title():
+    """Get the title of the currently active window on macOS."""
+    try:
+        if platform.system() == 'Darwin':  # macOS
+            script = 'tell application "System Events" to get name of first application process whose frontmost is true'
+            result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True)
+            return result.stdout.strip()
+        else:
+            # Default fallback for other platforms
+            return None
+    except Exception as e:
+        logger.warning(f"Could not determine active window: {e}")
+        return None
+
 # -----------------------------------------------------------------------------
 # VM Integration Functions
 # -----------------------------------------------------------------------------
 
-def check_vm_focus():
+def check_vm_focus(vm_window_patterns=None):
     """
-    Check if the VM window is in focus.
+    Check if the VM window is in focus based on window title.
     
+    Args:
+        vm_window_patterns (list): List of strings or regex patterns that match VM window titles
+        
     Returns:
         bool: True if the VM appears to be in focus
     """
-    # This is a basic implementation. In a real application, you would add
-    # more sophisticated focus detection for your specific VM software.
-    # For now, we'll just return True and rely on the user to ensure focus.
-    return True
+    if not vm_window_patterns:
+        # If no patterns provided, rely on user verification
+        return True
+        
+    current_window = get_active_window_title()
+    if not current_window:
+        return False
+        
+    # Check if current window matches any of the VM patterns
+    for pattern in vm_window_patterns:
+        if re.search(pattern, current_window, re.IGNORECASE):
+            return True
+            
+    return False
 
-def send_key(key):
+def send_key(key, max_retries=3):
     """
-    Send a single key press to the VM.
+    Send a single key press to the VM with retry capability.
     
     Args:
         key (str): The key to press
+        max_retries (int): Maximum number of retry attempts
+    
+    Returns:
+        bool: True if successful, False if failed after retries
     """
-    try:
-        pyautogui.press(key)
-        logger.debug(f"Sent key: {key}")
-    except Exception as e:
-        logger.error(f"Error sending key '{key}': {str(e)}")
-        raise
+    retries = 0
+    last_error = None
+    
+    while retries <= max_retries:
+        try:
+            pyautogui.press(key)
+            logger.debug(f"Sent key: {key}")
+            return True
+        except Exception as e:
+            last_error = e
+            retries += 1
+            logger.warning(f"Error sending key '{key}' (attempt {retries}/{max_retries}): {str(e)}")
+            time.sleep(0.2)  # Small delay before retry
+    
+    logger.error(f"Failed to send key '{key}' after {max_retries} attempts: {str(last_error)}")
+    return False
 
-def send_key_combination(modifier, key):
+def send_key_combination(modifier, key, max_retries=3):
     """
-    Send a key combination (e.g., Shift+1 for !) to the VM.
+    Send a key combination (e.g., Shift+1 for !) to the VM with retry capability.
     
     Args:
         modifier (str): The modifier key (e.g., 'shift', 'ctrl')
         key (str): The key to press with the modifier
+        max_retries (int): Maximum number of retry attempts
+    
+    Returns:
+        bool: True if successful, False if failed after retries
     """
-    try:
-        pyautogui.hotkey(modifier, key)
-        logger.debug(f"Sent key combination: {modifier}+{key}")
-    except Exception as e:
-        logger.error(f"Error sending key combination '{modifier}+{key}': {str(e)}")
-        raise
+    retries = 0
+    last_error = None
+    
+    while retries <= max_retries:
+        try:
+            pyautogui.hotkey(modifier, key)
+            logger.debug(f"Sent key combination: {modifier}+{key}")
+            return True
+        except Exception as e:
+            last_error = e
+            retries += 1
+            logger.warning(f"Error sending key combination '{modifier}+{key}' (attempt {retries}/{max_retries}): {str(e)}")
+            time.sleep(0.2)  # Small delay before retry
+    
+    logger.error(f"Failed to send key combination '{modifier}+{key}' after {max_retries} attempts: {str(last_error)}")
+    return False
 
-def send_text(text):
+def send_text(text, max_retries=3):
     """
-    Send a text string to the VM all at once.
+    Send a text string to the VM all at once with retry capability.
     Note: This is faster but less human-like than character-by-character.
     
     Args:
         text (str): The text to type
+        max_retries (int): Maximum number of retry attempts
+    
+    Returns:
+        bool: True if successful, False if failed after retries
     """
-    try:
-        pyautogui.write(text)
-        logger.debug(f"Sent text: '{text[:10]}...' ({len(text)} chars)")
-    except Exception as e:
-        logger.error(f"Error sending text: {str(e)}")
-        raise
+    retries = 0
+    last_error = None
+    
+    while retries <= max_retries:
+        try:
+            pyautogui.write(text)
+            logger.debug(f"Sent text: '{text[:10]}...' ({len(text)} chars)")
+            return True
+        except Exception as e:
+            last_error = e
+            retries += 1
+            logger.warning(f"Error sending text (attempt {retries}/{max_retries}): {str(e)}")
+            time.sleep(0.2)  # Small delay before retry
+    
+    logger.error(f"Failed to send text after {max_retries} attempts: {str(last_error)}")
+    return False
 
 # -----------------------------------------------------------------------------
 # Timing Functions
@@ -191,6 +262,12 @@ MEDIUM_CHARS = set('mfpgwybvkj')
 HARD_CHARS = set('xqz')
 PUNCTUATION = set('.,;:\'"-!?')
 SPECIAL_CHARS = set('@#$%^&*()_+{}|:<>?~')
+
+# Characters that are supported directly by PyAutoGUI and our engine
+SUPPORTED_CHARS = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789')
+SUPPORTED_CHARS.update(' \t\n')  # Add space, tab, and newline
+SUPPORTED_CHARS.update(PUNCTUATION)
+SUPPORTED_CHARS.update(SPECIAL_CHARS)
 
 def calculate_delay(char, speed_factor):
     """
@@ -244,6 +321,53 @@ def add_human_variance(base_delay):
     variance_factor = random.uniform(0.85, 1.20)
     return base_delay * variance_factor
 
+def is_supported_character(char):
+    """
+    Check if a character is supported for typing.
+    
+    Args:
+        char (str): The character to check
+        
+    Returns:
+        bool: True if supported, False otherwise
+    """
+    # Basic ASCII characters, punctuation, and our defined special chars are supported
+    if char in SUPPORTED_CHARS:
+        return True
+    
+    # Standard control characters might be supported
+    if ord(char) < 32:  # ASCII control characters
+        return False
+        
+    # Non-printable or exotic unicode might cause issues
+    if ord(char) > 127:
+        return False
+        
+    return False
+
+def validate_text(text):
+    """
+    Validate if all characters in the text can be typed reliably.
+    
+    Args:
+        text (str): The text to validate
+        
+    Returns:
+        tuple: (is_valid, unsupported_chars, positions)
+            is_valid (bool): True if all characters are supported
+            unsupported_chars (set): Set of unsupported characters
+            positions (list): List of (position, char) tuples for unsupported characters
+    """
+    unsupported_chars = set()
+    positions = []
+    
+    for i, char in enumerate(text):
+        if not is_supported_character(char):
+            unsupported_chars.add(char)
+            positions.append((i, char))
+    
+    return len(unsupported_chars) == 0, unsupported_chars, positions
+
 # -----------------------------------------------------------------------------
 # Keystroke Engine
 # -----------------------------------------------------------------------------
@@ -277,6 +401,8 @@ class KeystrokeEngine:
             '?': ('shift', '/'),
             '~': ('shift', '`'),
         }
+        # Keep track of failed keys
+        self.failed_keys = []
     
     def type_text(self, text, speed_factor, stop_event, pause_event):
         """
@@ -289,10 +415,11 @@ class KeystrokeEngine:
             pause_event (threading.Event): Event to signal pausing
             
         Yields:
-            tuple: (progress_fraction, current_character)
+            tuple: (progress_fraction, current_character, success)
         """
         total_chars = len(text)
         chars_typed = 0
+        self.failed_keys = []  # Reset failed keys tracking
         
         # Main typing loop
         for i, char in enumerate(text):
@@ -312,16 +439,21 @@ class KeystrokeEngine:
             actual_delay = add_human_variance(delay)
             
             # Type the character
+            success = False
             try:
                 if char == '\n':
-                    send_key('enter')
+                    success = send_key('enter')
                 elif char == '\t':
-                    send_key('tab')
+                    success = send_key('tab')
                 elif char in self.special_chars:
                     modifier, key = self.special_chars[char]
-                    send_key_combination(modifier, key)
+                    success = send_key_combination(modifier, key)
                 else:
-                    send_key(char)
+                    success = send_key(char)
+                
+                # Track failed keys
+                if not success:
+                    self.failed_keys.append((i, char))
                 
                 chars_typed += 1
                 progress = chars_typed / total_chars
@@ -329,14 +461,15 @@ class KeystrokeEngine:
                 # Wait before typing the next character
                 time.sleep(actual_delay)
                 
-                # Yield progress and current character
-                yield progress, char
+                # Yield progress, current character, and success status
+                yield progress, char, success
             
             except Exception as e:
                 logger.error(f"Error typing character '{char}': {str(e)}")
-                raise
+                self.failed_keys.append((i, char))
+                yield chars_typed / total_chars, char, False
         
-        logger.info("Typing completed")
+        logger.info(f"Typing completed with {len(self.failed_keys)} failed keys")
 
 # -----------------------------------------------------------------------------
 # GUI Implementation
@@ -349,8 +482,8 @@ class KeystrokeSimulatorGUI:
         """Initialize the GUI components."""
         self.root = tk.Tk()
         self.root.title("VM Keystroke Simulator")
-        self.root.geometry("600x500")
-        self.root.minsize(500, 400)
+        self.root.geometry("600x550")  # Increased height for new VM focus controls
+        self.root.minsize(500, 450)
         
         # Make window always on top
         self.root.attributes('-topmost', True)
@@ -366,6 +499,10 @@ class KeystrokeSimulatorGUI:
         
         # Track if we're currently typing
         self.is_typing = False
+        
+        # VM window patterns for focus detection
+        self.vm_window_patterns = []
+        self.check_focus_enabled = tk.BooleanVar(value=False)
         
         self._create_widgets()
         self._create_layout()
@@ -388,6 +525,25 @@ class KeystrokeSimulatorGUI:
         
         # Control frame
         self.control_frame = ttk.LabelFrame(self.root, text="Controls")
+        
+        # VM Focus Detection controls
+        self.focus_frame = ttk.LabelFrame(self.control_frame, text="VM Focus Detection")
+        self.focus_check = ttk.Checkbutton(
+            self.focus_frame, 
+            text="Enable VM window focus detection",
+            variable=self.check_focus_enabled
+        )
+        self.vm_title_label = ttk.Label(self.focus_frame, text="VM Window Title Contains:")
+        self.vm_title_entry = ttk.Entry(self.focus_frame, width=30)
+        self.vm_title_button = ttk.Button(
+            self.focus_frame, 
+            text="Add",
+            command=self.add_vm_window_pattern
+        )
+        self.vm_patterns_display = ttk.Label(
+            self.focus_frame, 
+            text="No VM window patterns added"
+        )
         
         # Speed control
         self.speed_frame = ttk.Frame(self.control_frame)
@@ -430,6 +586,18 @@ class KeystrokeSimulatorGUI:
         # Control frame
         self.control_frame.pack(fill=tk.X, padx=10, pady=5)
         
+        # VM Focus Detection layout
+        self.focus_frame.pack(fill=tk.X, padx=5, pady=5)
+        self.focus_check.pack(anchor=tk.W, padx=5, pady=2)
+        
+        focus_entry_frame = ttk.Frame(self.focus_frame)
+        focus_entry_frame.pack(fill=tk.X, padx=5, pady=2)
+        self.vm_title_label.pack(side=tk.LEFT, padx=2)
+        self.vm_title_entry.pack(side=tk.LEFT, padx=2, fill=tk.X, expand=True)
+        self.vm_title_button.pack(side=tk.LEFT, padx=2)
+        
+        self.vm_patterns_display.pack(anchor=tk.W, padx=5, pady=2)
+        
         # Speed control
         self.speed_frame.pack(fill=tk.X, padx=5, pady=5)
         self.speed_label.pack(side=tk.LEFT, padx=5)
@@ -455,6 +623,26 @@ class KeystrokeSimulatorGUI:
         # Focus event bindings for transparency change
         self.root.bind("<FocusOut>", self.on_focus_out)
         self.root.bind("<FocusIn>", self.on_focus_in)
+    
+    def add_vm_window_pattern(self):
+        """Add a VM window pattern to the list."""
+        pattern = self.vm_title_entry.get().strip()
+        if pattern:
+            self.vm_window_patterns.append(pattern)
+            self.vm_title_entry.delete(0, tk.END)
+            self.update_vm_patterns_display()
+    
+    def update_vm_patterns_display(self):
+        """Update the display of VM window patterns."""
+        if not self.vm_window_patterns:
+            self.vm_patterns_display.config(text="No VM window patterns added")
+        else:
+            patterns_text = "VM windows: " + ", ".join(
+                f'"{p}"' for p in self.vm_window_patterns[:3]
+            )
+            if len(self.vm_window_patterns) > 3:
+                patterns_text += f" and {len(self.vm_window_patterns)-3} more"
+            self.vm_patterns_display.config(text=patterns_text)
     
     def on_focus_out(self, event):
         """Handle focus out event - make window more transparent."""
@@ -513,6 +701,35 @@ class KeystrokeSimulatorGUI:
             messagebox.showinfo("Info", "Please enter some text to type.")
             return
         
+        # Validate text for unsupported characters
+        is_valid, unsupported_chars, positions = validate_text(text)
+        if not is_valid:
+            # Show the unsupported characters with options to continue or cancel
+            char_list = ', '.join([f"'{c}'" for c in unsupported_chars])
+            positions_sample = ', '.join([f"pos {p+1}: '{c}'" for p, c in positions[:5]])
+            if len(positions) > 5:
+                positions_sample += f", and {len(positions)-5} more..."
+            
+            message = (
+                f"Your text contains {len(positions)} characters that may not be supported:\n\n"
+                f"Characters: {char_list}\n"
+                f"Examples: {positions_sample}\n\n"
+                f"These characters might not type correctly. Do you want to continue anyway?"
+            )
+            
+            response = messagebox.askyesno("Unsupported Characters", message)
+            if not response:
+                return
+        
+        # Check VM focus if enabled before starting
+        if self.check_focus_enabled.get() and self.vm_window_patterns:
+            if not check_vm_focus(self.vm_window_patterns):
+                messagebox.showwarning(
+                    "VM Focus Warning",
+                    "The VM window does not appear to be in focus. Make sure to focus the VM window before typing."
+                )
+                return
+        
         # Tell user to focus the VM window
         messagebox.showinfo(
             "Prepare to Type",
@@ -564,6 +781,7 @@ class KeystrokeSimulatorGUI:
         """Run the typing process in a background thread."""
         total_chars = len(text)
         chars_typed = 0
+        failed_chars = 0
         
         try:
             # Give the user time to focus the VM window
@@ -574,10 +792,39 @@ class KeystrokeSimulatorGUI:
                 time.sleep(1)
             
             # Start typing using the keystroke engine
-            for progress, char in self.keystroke_engine.type_text(text, speed_factor, self.stop_typing, self.paused):
+            for progress, char, success in self.keystroke_engine.type_text(text, speed_factor, self.stop_typing, self.paused):
+                # Check VM focus if enabled (every 10 characters)
+                if self.check_focus_enabled.get() and self.vm_window_patterns and chars_typed % 10 == 0:
+                    if not check_vm_focus(self.vm_window_patterns):
+                        # Pause typing if focus is lost
+                        if not self.paused.is_set():
+                            self.paused.set()
+                            self.status_var.set("Typing paused: VM window lost focus")
+                            
+                            # Create a popup notification
+                            self.root.after(0, lambda: messagebox.showwarning(
+                                "Focus Lost",
+                                "VM window has lost focus. Typing is paused.\n\n"
+                                "Focus the VM window to continue or press ESC to stop."
+                            ))
+                            
+                            # Wait for focus to return or user to cancel
+                            while not check_vm_focus(self.vm_window_patterns) and not self.stop_typing.is_set():
+                                time.sleep(0.5)
+                                
+                            # Resume if focus returned and not stopped
+                            if not self.stop_typing.is_set():
+                                self.paused.clear()
+                                self.status_var.set("Typing resumed: VM window focus restored")
+                
                 chars_typed += 1
+                if not success:
+                    failed_chars += 1
+                    
                 self.progress_var.set(progress * 100)
+                self.status_var.set(f"Typing in progress... ({failed_chars} failed keys)")
                 self.root.update_idletasks()
+                
         except Exception as e:
             messagebox.showerror("Error", f"Typing error: {str(e)}")
         finally:
@@ -585,7 +832,21 @@ class KeystrokeSimulatorGUI:
             self.is_typing = False
             self.root.attributes('-alpha', 1.0)  # Restore full opacity
             self.emergency_label.config(background=self.root.cget('background'))
-            self.status_var.set("Typing completed")
+            
+            # Show final status with failed keys summary
+            if failed_chars > 0:
+                self.status_var.set(f"Typing completed with {failed_chars} failed keys")
+                # Show a summary of failed keys if any
+                if self.keystroke_engine.failed_keys:
+                    failed_msg = "Some keys failed to type. The following characters failed:\n\n"
+                    for pos, char in self.keystroke_engine.failed_keys[:10]:  # Show first 10 failed keys
+                        failed_msg += f"Position {pos+1}: '{char}'\n"
+                    if len(self.keystroke_engine.failed_keys) > 10:
+                        failed_msg += f"...and {len(self.keystroke_engine.failed_keys) - 10} more."
+                    messagebox.showwarning("Failed Keys", failed_msg)
+            else:
+                self.status_var.set("Typing completed successfully")
+                
             self.start_button.config(state=tk.NORMAL)
             self.load_button.config(state=tk.NORMAL)
     
@@ -595,6 +856,15 @@ class KeystrokeSimulatorGUI:
             return
         
         if self.paused.is_set():
+            # Check VM focus before resuming if enabled
+            if self.check_focus_enabled.get() and self.vm_window_patterns:
+                if not check_vm_focus(self.vm_window_patterns):
+                    messagebox.showwarning(
+                        "VM Focus Warning",
+                        "The VM window does not appear to be in focus. Make sure to focus the VM window before resuming."
+                    )
+                    return
+            
             self.paused.clear()
             self.status_var.set("Typing resumed")
         else:
